@@ -578,7 +578,7 @@
 
         time.Sleep(time.Second * 2)
     }
-#### 6.4.4 Mutex互斥锁
+### 6.5 Mutex互斥锁
 >有必要复习一下线程同步的知识：线程并发执行时，T1线程有指令I1，I2，T2线程有指令I3，I4，那么在实际执行时指令执行顺序可能是1234，1324，1342...即异步，同步则是让某条指令只能在某条指令之后执行，如I2必须在I4后执行，那么1234的顺序就是不可接受的。那么该如何实现同步呢？这里要再插入一下互斥资源的访问机制，再将其思想迁移过来。
 
 >两个线程访问打印机这种互斥资源，必须在一个线程占有资源-打印数据-释放资源这一整套操作之后才能将资源给下一个线程使用，否则在并发执行过程中，两个线程各自打印自己的数据，打印出来的结果就混在一起了。互斥的实现分软件和硬件两大类。软件类下有4种，重点关注一下双标志先检查法，即在确认对方不想占有资源后，表示自己想要占有资源。当然这种方法在并发下存在问题，因为“确认对方不想占有”和“表示自己想要占有”两个指令不能保证紧接着执行而不被其他程序抢走时间片。
@@ -620,4 +620,276 @@
         wg.Wait()
         fmt.Printf("end x: %v\n", x)
     }
->上面的代码里要注意x++不是原语，可能是先取数x，再加一，再赋值回去，这样假设协程并发执行，俩协程都取了x=100，都加一，再赋值回去，那么x是101而不是102，所以就用锁把它锁上，可以类比关中断和开中断。
+>上面的代码里要注意x++不是原语，可能是先取数x，再加一，再赋值回去。假设协程并发执行，俩协程都取了x=100，都加一，再赋值回去，那么x是101而不是102，所以需要用锁把它锁上，可以类比关中断和开中断。
+
+### 6.6 channel的遍历
+>不关闭通道时，前两个读取没有问题，第三个报错死锁。关闭通道时，读到默认值0.
+
+    package main
+
+    import "fmt"
+
+    var c = make(chan int)
+
+    func main() {
+        go func() {
+            for i := 0; i < 2; i++ {
+                c <- i
+            }
+            // close(c)
+        }()
+
+        r := <-c
+        fmt.Printf("r: %v\n", r)
+        r = <-c
+        fmt.Printf("r: %v\n", r)
+        r = <-c
+        fmt.Printf("r: %v\n", r)
+    }
+
+>for-range循环
+
+    package main
+
+    import "fmt"
+
+    var c = make(chan int)
+
+    func main() {
+        go func() {
+            for i := 0; i < 2; i++ {
+                c <- i
+            }
+            close(c)
+        }()
+
+        for v := range c {
+            fmt.Printf("v: %v\n", v)
+        }
+    }
+
+### 6.7 select switch
+1. select是一个控制结构，类似于switch，用于处理异步OI操作。select会监听case语句中channel的读写操作，当case中channel读写操作为非阻塞状态（能读写）时，将会出发相应的动作。
+    - select中的case语句必须是一个channel操作。
+    - select中的default子句总是可执行的。
+2. 如果多个case可运行，会公平地选择其中之一。
+3. 无可运行case，且有default语句，则执行default语句。
+4. 无可运行case，且无default，select会阻塞，直到某个case通信可运行。
+
+        var chanInt = make(chan int)
+        var chanStr = make(chan string)
+
+        func main() {
+            go func() {
+                chanInt <- 100
+                chanStr <- "hello"
+                close(chanInt)
+                close(chanStr)
+            }()
+
+            for {
+                select {
+                case r := <-chanInt:
+                    fmt.Printf("r: %v\n", r)
+                case r := <-chanStr:
+                    fmt.Printf("r: %v\n", r)
+                default:
+                    fmt.Println("default...")
+                }
+                time.Sleep(time.Second)
+            }
+        }
+### 6.8 原子操作
+>类似操作系统里的元语的概念，很直观。
+    var x int32 = 100
+
+    func add() {
+        atomic.AddInt32(&x, 1)
+    }
+
+    func sub() {
+        atomic.AddInt32(&x, -1)
+    }
+
+    func main() {
+        for i := 0; i < 100; i++ {
+            go add()
+            go sub()
+        }
+        time.Sleep(time.Second * 1)
+        fmt.Printf("x: %v\n", x)
+    }
+- 增减操作
+- 载入操作：atomic.LoadInt32(&x) atomic.StoreInt32(&x, 200)
+- 交换操作：
+
+        var x int32 = 100
+	    boolValue := atomic.CompareAndSwapInt32(&x, 100, 200)
+## 7 golang操作数据库
+### 7.0 配置
+1. mySQL下载，密码：123456，创建go_db.
+2. 在 https://pkg.go.dev/ 搜索mysql，go get 安装包。
+
+        package main
+
+        import (
+            "database/sql"
+            "fmt"
+            "time"
+
+            _ "github.com/go-sql-driver/mysql"
+        )
+
+        // ...
+
+        func main() {
+            db, err := sql.Open("mysql", "root:123456@/go_db")
+            if err != nil {
+                panic(err)
+            }
+            // See "Important settings" section.
+            db.SetConnMaxLifetime(time.Minute * 3)
+            db.SetMaxOpenConns(10)
+            db.SetMaxIdleConns(10)
+            fmt.Printf("db: %v\n", db)
+        }
+### 7.1 数据库初始化
+>尝试连接已有的数据库
+
+    var db *sql.DB
+
+    func initDB() (err error) {
+        dsn := "root:123456@tcp(127.0.0.1:3306)/go_db?charset=utf8mb4&parseTime=True"
+        db, err = sql.Open("mysql", dsn) // 检验dsn的格式是否正确
+        if err != nil {
+            return err
+        }
+
+        err = db.Ping() // 检验dsn真实有效
+        if err != nil {
+            return err
+        }
+        return nil
+    }
+
+    func main() {
+        err := initDB()
+        if err != nil {
+            fmt.Printf("初始化失败！err: %v\n", err)
+            return
+        } else {
+            fmt.Println("初始化成功！")
+        }
+    }
+### 7.2 数据库的增删改查
+    package main
+
+    import (
+        "database/sql"
+        "fmt"
+
+        _ "github.com/go-sql-driver/mysql"
+    )
+
+    var db *sql.DB
+
+    // -------------------------------------------- 初始化 --------------------------------------------
+    func initDB() (err error) {
+        dsn := "root:123456@tcp(127.0.0.1:3306)/go_db?charset=utf8mb4&parseTime=True"
+        db, err = sql.Open("mysql", dsn) // 检验dsn的格式是否正确
+        if err != nil {
+            return err
+        }
+
+        err = db.Ping() // 检验dsn真实有效
+        if err != nil {
+            return err
+        }
+        return nil
+    }
+
+    // -------------------------------------------- 增 --------------------------------------------
+    func insert(str1 string, str2 string) {
+        s := "insert into user_tbl(username, password) values(?, ?)"
+        r, err1 := db.Exec(s, str1, str2)
+        if err1 != nil {
+            fmt.Printf("插入失败！err1: %v\n", err1)
+            return
+        }
+        i, err2 := r.LastInsertId()
+        if err2 != nil {
+            fmt.Printf("id输出错误!err2: %v\n", err2)
+            return
+        }
+        fmt.Printf("插入成功！id: %v\n", i)
+    }
+
+    // -------------------------------------------- 删 --------------------------------------------
+    func delete(index int) {
+        s := "delete from user_tbl where id=?"
+        r, err := db.Exec(s, index)
+        if err != nil {
+            fmt.Printf("err: %v\n", err)
+        } else {
+            i, _ := r.RowsAffected()
+            fmt.Printf("i: %v\n", i)
+        }
+    }
+
+    // -------------------------------------------- 改 --------------------------------------------
+    func update(username string, password string, id int) {
+        s := "update user_tbl set username=?, password=? where id=?"
+        r, err := db.Exec(s, username, password, id)
+        if err != nil {
+            fmt.Printf("err: %v\n", err)
+        } else {
+            i, _ := r.RowsAffected() // 返回执行完毕的 SQL 语句影响到的行数。
+            fmt.Printf("i: %v\n", i)
+        }
+    }
+
+    // -------------------------------------------- 查 --------------------------------------------
+    type User struct {
+        id       int
+        username string
+        password string
+    }
+
+    func queryOneRow(id int) {
+        s := "select * from user_tbl where id = ?"
+        var u User
+        err := db.QueryRow(s, id).Scan(&u.id, &u.username, &u.password)
+        if err != nil {
+            fmt.Printf("err: %v\n", err)
+            return
+        } else {
+            fmt.Printf("u: %v\n", u)
+        }
+    }
+
+    func queryManyRow() {
+        s := "select * from user_tbl"
+        r, err := db.Query(s)
+        defer r.Close()
+        if err != nil {
+            fmt.Printf("err: %v\n", err)
+            return
+        } else {
+            for r.Next() {
+                var u User
+                r.Scan(&u.id, &u.username, &u.password)
+                fmt.Printf("u: %v\n", u)
+            }
+        }
+    }
+
+    // -------------------------------------------- 主函数 --------------------------------------------
+    func main() {
+        err := initDB()
+        if err != nil {
+            fmt.Printf("初始化失败！err: %v\n", err)
+            return
+        } else {
+            fmt.Println("初始化成功！")
+        }
+    }
